@@ -8,7 +8,7 @@ import pickle
 
 import preprocess
 from trainingDataset import trainingDataset
-from model_VC2 import Generator, Discriminator
+from model_VC2 import Generator, Discriminator, Encoder, Decoder
 
 
 class CycleGANTraining:
@@ -44,11 +44,25 @@ class CycleGANTraining:
         self.coded_sps_B_mean = mcep_normalization['mean_B']
         self.coded_sps_B_std = mcep_normalization['std_B']
 
-        # Generator and Discriminator
+        # Encoder and Decoder
+        self.encoder_plus_minus = Encoder().to(self.device)
+        self.encoder_minus_plus = Encoder().to(self.device)
+        self.encoder_minus_minus = Encoder().to(self.device)
+        self.decoder_2A = Decoder().to(self.device)
+        self.decoder_2B = Decoder().to(self.device)
+
+        # Discriminator
+        self.cnn_discriminator_A = CNN_Discriminator().to(self.device)
+        self.rnn_discriminator_A = RNN_Discriminator().to(self.device)
+        self.discriminator_A = Discriminator().to(self.device)
+        self.cnn_discriminator_B = CNN_Discriminator().to(self.device)
+        self.rnn_discriminator_B = RNN_Discriminator().to(self.device)
+        self.discriminator_B = Discriminator().to(self.device)
+
+
+
         self.generator_A2B = Generator().to(self.device)
         self.generator_B2A = Generator().to(self.device)
-        self.discriminator_A = Discriminator().to(self.device)
-        self.discriminator_B = Discriminator().to(self.device)
 
         # Loss Functions
         criterion_mse = torch.nn.MSELoss()
@@ -58,6 +72,10 @@ class CycleGANTraining:
             list(self.generator_B2A.parameters())
         d_params = list(self.discriminator_A.parameters()) + \
             list(self.discriminator_B.parameters())
+        cnn_d_params = list(self.cnn_discriminator_A.parameters()) + \
+            list(self.cnn_discriminator_B.parameters())
+        rnn_d_params = ist(self.rnn_discriminator_A.parameters()) + \
+            list(self.rnn_discriminator_B.parameters())
 
         # Initial learning rates
         self.generator_lr = 0.0002
@@ -74,6 +92,10 @@ class CycleGANTraining:
             g_params, lr=self.generator_lr, betas=(0.5, 0.999))
         self.discriminator_optimizer = torch.optim.Adam(
             d_params, lr=self.discriminator_lr, betas=(0.5, 0.999))
+        self.cnn_discriminator_optimizer = torch.optim.Adam(
+            cnn_d_params, lr=self.discriminator_lr, betas=(0.5, 0.999))
+        self.rnn_discriminator_optimizer = torch.optim.Adam(
+            rnn_d_params, lr=self.discriminator_lr, betas=(0.5, 0.999))
 
         # To Load save previously saved models
         self.modelCheckpoint = model_checkpoint
@@ -87,6 +109,8 @@ class CycleGANTraining:
         # Storing Discriminatior and Generator Loss
         self.generator_loss_store = []
         self.discriminator_loss_store = []
+        self.cnn_discriminator_loss_store = []
+        self.rnn_discriminator_loss_store = []
 
         self.file_name = 'log_store_non_sigmoid.txt'
 
@@ -110,6 +134,8 @@ class CycleGANTraining:
     def reset_grad(self):
         self.generator_optimizer.zero_grad()
         self.discriminator_optimizer.zero_grad()
+        self.cnn_discriminator_optimizer.zero_grad()
+        self.rnn_discriminator_optimizer.zero_grad()
 
     def train(self):
         # Training Begins
@@ -151,16 +177,70 @@ class CycleGANTraining:
                 real_A = real_A.to(self.device).float()
                 real_B = real_B.to(self.device).float()
 
+                # Embeddings
+                embedding_A_minus_plus = self.encoder_minus_plus(real_A)
+                embedding_A_plus_minus = self.encoder_plus_minus(real_A)
+                embedding_A_minus_minus = self.encoder_minus_minus(real_A)
+
+                
+                embedding_B_minus_plus = self.encoder_minus_plus(real_B)
+                embedding_B_plus_minus = self.encoder_plus_minus(real_B)
+                embedding_B_minus_minus = self.encoder_minus_minus(real_B)
+
+
+                # Embedding CNN loss
+                d_embedding_A_minus_plus = self.cnn_discriminator_A(embedding_A_minus_plus)
+                d_embedding_A_plus_minus = self.cnn_discriminator_A(embedding_A_plus_minus)
+                d_embedding_A_minus_minus = self.cnn_discriminator_A(embedding_A_minus_minus)
+                d_embedding_B_minus_plus = self.cnn_discriminator_B(embedding_B_minus_plus)
+                d_embedding_B_plus_minus = self.cnn_discriminator_B(embedding_B_plus_minus)
+                d_embedding_B_minus_minus = self.cnn_discriminator_B(embedding_B_minus_minus)
+                d_loss_cnn_A = -torch.mean((1 - d_embedding_A_minus_plus) ** 2) + \
+                               torch.mean((1 - d_embedding_A_plus_minus) ** 2) + \
+                               -torch.mean((1 - d_embedding_A_minus_minus) ** 2)
+                d_loss_cnn_B = -torch.mean((1 - d_embedding_B_minus_plus) ** 2) + \
+                               torch.mean((1 - d_embedding_B_plus_minus) ** 2) + \
+                               -torch.mean((1 - d_embedding_B_minus_minus) ** 2)
+                d_loss_cnn = ( d_loss_cnn_A + d_loss_cnn_B ) / 2
+                self.cnn_discriminator_loss_store.append(d_loss_cnn.item())
+                self.zero_grad()
+                d_loss_cnn.backward()
+                self.cnn_discriminator_optimizer.step()
+
+                # Embedding RNN loss
+                d_embedding_A_minus_plus = self.rnn_discriminator_A(embedding_A_minus_plus)
+                d_embedding_A_plus_minus = self.rnn_discriminator_A(embedding_A_plus_minus)
+                d_embedding_A_minus_minus = self.rnn_discriminator_A(embedding_A_minus_minus)
+                d_embedding_B_minus_plus = self.rnn_discriminator_B(embedding_B_minus_plus)
+                d_embedding_B_plus_minus = self.rnn_discriminator_B(embedding_B_plus_minus)
+                d_embedding_B_minus_minus = self.rnn_discriminator_B(embedding_B_minus_minus)
+                d_loss_rnn_A = -torch.mean((1 - d_embedding_A_minus_plus) ** 2) + \
+                            torch.mean((1 - d_embedding_A_plus_minus) ** 2) + \
+                            -torch.mean((1 - d_embedding_A_minus_minus) ** 2)
+                d_loss_rnn_B = -torch.mean((1 - d_embedding_B_minus_plus) ** 2) + \
+                            torch.mean((1 - d_embedding_B_plus_minus) ** 2) + \
+                            -torch.mean((1 - d_embedding_B_minus_minus) ** 2)
+                d_loss_rnn = ( d_loss_rnn_A + d_loss_rnn_B ) / 2
+                self.rnn_discriminator_loss_store.append(d_loss_rnn.item())
+                self.zero_grad()
+                d_loss_rnn.backward()
+                self.rnn_discriminator_optimizer.step()
+
+                # Generator
+                
+                embedding_A_minus_minus = self.encoder_minus_minus(real_A)
+                embedding_B_minus_minus = self.encoder_minus_minus(real_B)
+
+                fake_B = self.decoder_2B(embedding_A_minus_minus)
+                cycle_A = self.decoder_2A(self.encoder_minus_minus(fake_B))
+
+                fake_A = self.decoder_2A(embedding_B_minus_minus)
+                cycle_B = self.decoder_2B(self.encoder_minus_minus(fake_A))
+
+                identity_A = self.decoder_2A(embedding_A_minus_minus)
+                identity_B = self.decoder_2B(embedding_B_minus_minus)
+
                 # Generator Loss function
-
-                fake_B = self.generator_A2B(real_A)
-                cycle_A = self.generator_B2A(fake_B)
-
-                fake_A = self.generator_B2A(real_B)
-                cycle_B = self.generator_A2B(fake_A)
-
-                identity_A = self.generator_B2A(real_A)
-                identity_B = self.generator_A2B(real_B)
 
                 d_fake_A = self.discriminator_A(fake_A)
                 d_fake_B = self.discriminator_B(fake_B)
@@ -198,10 +278,10 @@ class CycleGANTraining:
                 d_real_A = self.discriminator_A(real_A)
                 d_real_B = self.discriminator_B(real_B)
 
-                generated_A = self.generator_B2A(real_B)
+                generated_A = self.decoder_2A(self.encoder_minus_minus(real_B))
                 d_fake_A = self.discriminator_A(generated_A)
 
-                generated_B = self.generator_A2B(real_A)
+                generated_B = self.decoder_2B(self.encoder_minus_minus(real_A))
                 d_fake_B = self.discriminator_B(generated_B)
 
                 # Loss Functions
